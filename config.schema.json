@@ -1,10 +1,16 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
+  "pluginAlias": "BlindsHomebridgePlugin",
   "pluginType": "platform",
   "singular": true,
   "schema": {
     "type": "object",
     "properties": {
+      "host": {
+        "title": "Host",
+        "type": "string",
+        "required": true,
+        "default": ""
+      },
       "name": {
         "title": "Name",
         "type": "string",

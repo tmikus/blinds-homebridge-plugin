@@ -1,141 +1,132 @@
-import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
-
-import { ExampleHomebridgePlatform } from './platform';
+import {
+  Service,
+  PlatformAccessory,
+  PlatformConfig,
+  CharacteristicGetCallback,
+  CharacteristicSetCallback,
+} from 'homebridge';
+import { BlindsHomebridgePlatform } from './platform';
+import {CharacteristicValue} from 'hap-nodejs/dist/types';
+import {StatusResponse} from './api';
+import {fetch} from './fetch';
 
 /**
  * Platform Accessory
  * An instance of this class is created for each accessory your platform registers
  * Each accessory may expose multiple services of different service types.
  */
-export class ExamplePlatformAccessory {
+export class BlindsPlatformAccessory {
+  private readonly host: string;
   private service: Service;
 
-  /**
-   * These are just used to create a working example
-   * You should implement your own code to track the state of your accessory
-   */
-  private exampleStates = {
-    On: false,
-    Brightness: 100,
-  };
-
   constructor(
-    private readonly platform: ExampleHomebridgePlatform,
+    private readonly config: PlatformConfig,
+    private readonly platform: BlindsHomebridgePlatform,
     private readonly accessory: PlatformAccessory,
   ) {
+    // Set configuration properties
+    this.host = config.host;
 
     // set accessory information
     this.accessory.getService(this.platform.Service.AccessoryInformation)!
-      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
-      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
+      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Tomasz Mikus')
+      .setCharacteristic(this.platform.Characteristic.Model, 'Blinds')
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, '000-000-001');
 
     // get the LightBulb service if it exists, otherwise create a new LightBulb service
     // you can create multiple services for each accessory
-    this.service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
+    this.service = (
+      this.accessory.getService(this.platform.Service.WindowCovering)
+      || this.accessory.addService(this.platform.Service.WindowCovering)
+    );
 
     // set the service name, this is what is displayed as the default name on the Home app
     // in this example we are using the name we stored in the `accessory.context` in the `discoverDevices` method.
     this.service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.exampleDisplayName);
 
-    // each service must implement at-minimum the "required characteristics" for the given service type
-    // see https://developers.homebridge.io/#/service/Lightbulb
+    this.service.getCharacteristic(this.platform.Characteristic.CurrentPosition)
+      .on('get', this.getCurrentPositionCharacteristic);
 
-    // register handlers for the On/Off Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.On)
-      .onSet(this.setOn.bind(this))                // SET - bind to the `setOn` method below
-      .onGet(this.getOn.bind(this));               // GET - bind to the `getOn` method below
+    this.service.getCharacteristic(this.platform.Characteristic.PositionState)
+      .on('get', this.getPositionStateCharacteristic);
 
-    // register handlers for the Brightness Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.Brightness)
-      .onSet(this.setBrightness.bind(this));       // SET - bind to the 'setBrightness` method below
-
-    /**
-     * Creating multiple services of the same type.
-     *
-     * To avoid "Cannot add a Service with the same UUID another Service without also defining a unique 'subtype' property." error,
-     * when creating multiple services of the same type, you need to use the following syntax to specify a name and subtype id:
-     * this.accessory.getService('NAME') || this.accessory.addService(this.platform.Service.Lightbulb, 'NAME', 'USER_DEFINED_SUBTYPE_ID');
-     *
-     * The USER_DEFINED_SUBTYPE must be unique to the platform accessory (if you platform exposes multiple accessories, each accessory
-     * can use the same sub type id.)
-     */
-
-    // Example: add two "motion sensor" services to the accessory
-    const motionSensorOneService = this.accessory.getService('Motion Sensor One Name') ||
-      this.accessory.addService(this.platform.Service.MotionSensor, 'Motion Sensor One Name', 'YourUniqueIdentifier-1');
-
-    const motionSensorTwoService = this.accessory.getService('Motion Sensor Two Name') ||
-      this.accessory.addService(this.platform.Service.MotionSensor, 'Motion Sensor Two Name', 'YourUniqueIdentifier-2');
-
-    /**
-     * Updating characteristics values asynchronously.
-     *
-     * Example showing how to update the state of a Characteristic asynchronously instead
-     * of using the `on('get')` handlers.
-     * Here we change update the motion sensor trigger states on and off every 10 seconds
-     * the `updateCharacteristic` method.
-     *
-     */
-    let motionDetected = false;
-    setInterval(() => {
-      // EXAMPLE - inverse the trigger
-      motionDetected = !motionDetected;
-
-      // push the new value to HomeKit
-      motionSensorOneService.updateCharacteristic(this.platform.Characteristic.MotionDetected, motionDetected);
-      motionSensorTwoService.updateCharacteristic(this.platform.Characteristic.MotionDetected, !motionDetected);
-
-      this.platform.log.debug('Triggering motionSensorOneService:', motionDetected);
-      this.platform.log.debug('Triggering motionSensorTwoService:', !motionDetected);
-    }, 10000);
+    this.service.getCharacteristic(this.platform.Characteristic.TargetPosition)
+      .on('get', this.getTargetPositionCharacteristic)
+      .on('set', this.setTargetPositionCharacteristic);
   }
 
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, turning on a Light bulb.
-   */
-  async setOn(value: CharacteristicValue) {
-    // implement your own code to turn your device on/off
-    this.exampleStates.On = value as boolean;
+  getUrl = (action?: string) => {
+    return 'http://' + this.host + (action || '/');
+  };
 
-    this.platform.log.debug('Set Characteristic On ->', value);
-  }
+  getCurrentPositionCharacteristic = async (next: CharacteristicGetCallback) => {
+    // TODO: Buffer the status
+    try {
+      const response = await fetch(this.getUrl());
+      const json = (await response.json()) as StatusResponse;
+      const currentPosition = json.currentPosition;
+      this.platform.log.debug('Current position: ' + currentPosition);
+      next(null, currentPosition);
+    } catch (ex) {
+      const err = ex as Error;
+      this.platform.log.error('Error while getting current position: ' + err.toString());
+      next(err);
+    }
+  };
 
-  /**
-   * Handle the "GET" requests from HomeKit
-   * These are sent when HomeKit wants to know the current state of the accessory, for example, checking if a Light bulb is on.
-   *
-   * GET requests should return as fast as possbile. A long delay here will result in
-   * HomeKit being unresponsive and a bad user experience in general.
-   *
-   * If your device takes time to respond you should update the status of your device
-   * asynchronously instead using the `updateCharacteristic` method instead.
+  getPositionStateCharacteristic = async (next: CharacteristicGetCallback) => {
+    // TODO: Buffer the status
+    try {
+      const response = await fetch(this.getUrl());
+      const json = (await response.json()) as StatusResponse;
+      const state = json.state;
+      this.platform.log.debug('Current state: ' + state);
+      switch (state) {
+        case 'opening':
+          next(null, this.platform.Characteristic.PositionState.INCREASING);
+          break;
+        case 'closing':
+          next(null, this.platform.Characteristic.PositionState.DECREASING);
+          break;
+        case 'stopped':
+          next(null, this.platform.Characteristic.PositionState.STOPPED);
+          break;
+        default:
+          next(null, this.platform.Characteristic.PositionState.STOPPED);
+      }
+    } catch (ex) {
+      const err = ex as Error;
+      this.platform.log.error('Error while getting state: ' + err.toString());
+      next(err);
+    }
+  };
 
-   * @example
-   * this.service.updateCharacteristic(this.platform.Characteristic.On, true)
-   */
-  async getOn(): Promise<CharacteristicValue> {
-    // implement your own code to check if the device is on
-    const isOn = this.exampleStates.On;
+  getTargetPositionCharacteristic = async (next: CharacteristicGetCallback) => {
+    // TODO: Buffer the status
+    try {
+      const response = await fetch(this.getUrl());
+      const json = (await response.json()) as StatusResponse;
+      const targetPosition = json.targetPosition;
+      this.platform.log.debug('Target position: ' + targetPosition);
+      next(null, targetPosition);
+    } catch (ex) {
+      const err = ex as Error;
+      this.platform.log.error('Error while getting target position: ' + err.toString());
+      next(err);
+    }
+  };
 
-    this.platform.log.debug('Get Characteristic On ->', isOn);
-
-    // if you need to return an error to show the device as "Not Responding" in the Home app:
-    // throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-
-    return isOn;
-  }
-
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, changing the Brightness
-   */
-  async setBrightness(value: CharacteristicValue) {
-    // implement your own code to set the brightness
-    this.exampleStates.Brightness = value as number;
-
-    this.platform.log.debug('Set Characteristic Brightness -> ', value);
-  }
-
+  setTargetPositionCharacteristic = async (value: CharacteristicValue, next: CharacteristicSetCallback) => {
+    try {
+      await fetch(this.getUrl('/position'), {
+        body: value.toString(),
+        method: 'POST',
+      });
+      next();
+    } catch (ex) {
+      const err = ex as Error;
+      this.platform.log.error('Error while setting target position: ' + err.toString());
+      next(err);
+    }
+  };
 }
